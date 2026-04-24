@@ -31,7 +31,7 @@ export default function WebRTCVideo({
   // Video and stream related refs and states
   const videoElm = useRef<HTMLVideoElement>(null);
   const fullscreenContainerRef = useRef<HTMLDivElement>(null);
-  const { mediaStream, peerConnectionState } = useRTCStore();
+  const { mediaStream, peerConnectionState, audioTransceiver } = useRTCStore();
   const [isPlaying, setIsPlaying] = useState(false);
   const [isPointerLockActive, setIsPointerLockActive] = useState(false);
   const [isKeyboardLockActive, setIsKeyboardLockActive] = useState(false);
@@ -105,8 +105,12 @@ export default function WebRTCVideo({
 
   const onVideoPlaying = useCallback(() => {
     setIsPlaying(true);
-    if (videoElm.current) updateVideoSizeStore(videoElm.current);
-  }, [updateVideoSizeStore]);
+    if (videoElm.current) {
+      updateVideoSizeStore(videoElm.current);
+      // Unmute once playing — safe to do here since autoplay already succeeded
+      if (audioTransceiver) videoElm.current.muted = false;
+    }
+  }, [audioTransceiver, updateVideoSizeStore]);
 
   // On mount, get the video size
   useEffect(

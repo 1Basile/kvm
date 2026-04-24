@@ -154,6 +154,7 @@ export default function KvmIdRoute() {
     setTurnServerInUse,
     rpcDataChannel,
     setTransceiver,
+    setAudioTransceiver,
     setRpcHidChannel,
     setRpcHidUnreliableNonOrderedChannel,
     setRpcHidUnreliableChannel,
@@ -228,7 +229,7 @@ export default function KvmIdRoute() {
         attempts++;
 
         // When vivaldi has disabled "Broadcast IP for Best WebRTC Performance", this never connects
-        if (pc.sctp?.state === "connected") {
+        if (pc.connectionState === "connected") {
           console.log("[setRemoteSessionDescription] Remote description set");
           clearInterval(checkInterval);
           setLoadingMessage(m.connection_established());
@@ -511,6 +512,7 @@ export default function KvmIdRoute() {
     };
 
     setTransceiver(pc.addTransceiver("video", { direction: "recvonly" }));
+    setAudioTransceiver(pc.addTransceiver("audio", { direction: "sendrecv" }));
 
     const rpcDataChannel = pc.createDataChannel("rpc");
     rpcDataChannel.onclose = () => {
@@ -585,6 +587,7 @@ export default function KvmIdRoute() {
     setRpcHidProtocolVersion,
     setTerminalChannel,
     setTransceiver,
+    setAudioTransceiver,
   ]);
 
   useEffect(() => {

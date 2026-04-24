@@ -174,6 +174,7 @@ var (
 		RelativeMouse: true,
 		Keyboard:      true,
 		MassStorage:   true,
+		UAC2Audio:     true,
 	}
 )
 
@@ -272,6 +273,13 @@ func LoadConfig() {
 
 	if loadedConfig.UsbDevices == nil {
 		loadedConfig.UsbDevices = getDefaultConfig().UsbDevices
+	} else {
+		// Apply defaults for fields added after the initial release so that
+		// existing configs without these fields get the right behaviour.
+		defaults := getDefaultConfig().UsbDevices
+		if !loadedConfig.UsbDevices.UAC2Audio && defaults.UAC2Audio {
+			loadedConfig.UsbDevices.UAC2Audio = true
+		}
 	}
 
 	if loadedConfig.NetworkConfig == nil {

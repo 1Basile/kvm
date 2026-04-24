@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jetkvm/kvm/internal/diagnostics"
@@ -25,6 +26,7 @@ import (
 type Session struct {
 	peerConnection           *webrtc.PeerConnection
 	VideoTrack               *webrtc.TrackLocalStaticSample
+	AudioTrack               *webrtc.TrackLocalStaticSample
 	ControlChannel           *webrtc.DataChannel
 	RPCChannel               *webrtc.DataChannel
 	HidChannel               *webrtc.DataChannel
@@ -144,10 +146,7 @@ func resolveCodec(offerSDP string) string {
 		return webrtc.MimeTypeH264
 	case "h264":
 		return webrtc.MimeTypeH264
-	default: // "auto" or ""
-		if browserSupportsH265 {
-			return webrtc.MimeTypeH265
-		}
+	default: // "auto" or "" — default to H.264 until H.265 pipeline is stable
 		return webrtc.MimeTypeH264
 	}
 }
@@ -165,6 +164,7 @@ func (s *Session) ExchangeOffer(offerStr string) (string, error) {
 
 	codec := resolveCodec(offer.SDP)
 	s.codecMimeType = codec
+	dbgLog("ExchangeOffer: codec=%s browserSupportsH265=%v", codec, strings.Contains(strings.ToUpper(offer.SDP), "H265"))
 
 	s.VideoTrack, err = webrtc.NewTrackLocalStaticSample(
 		webrtc.RTPCodecCapability{MimeType: codec}, "video", "kvm")
@@ -186,6 +186,43 @@ func (s *Session) ExchangeOffer(offerStr string) (string, error) {
 			}
 		}
 	}()
+
+	// Add audio track for HDMI audio capture.
+	s.AudioTrack, err = webrtc.NewTrackLocalStaticSample(
+		webrtc.RTPCodecCapability{
+			MimeType:  webrtc.MimeTypeOpus,
+			ClockRate: 48000,
+			Channels:  2,
+		},
+		"audio", "kvm",
+	)
+	if err != nil {
+		return "", err
+	}
+	audioTransceiver, err := s.peerConnection.AddTransceiverFromTrack(s.AudioTrack, webrtc.RTPTransceiverInit{
+		Direction: webrtc.RTPTransceiverDirectionSendrecv,
+	})
+	if err != nil {
+		return "", err
+	}
+	go func() {
+		rtcpBuf := make([]byte, 1500)
+		for {
+			if _, _, rtcpErr := audioTransceiver.Sender().Read(rtcpBuf); rtcpErr != nil {
+				return
+			}
+		}
+	}()
+
+	// Resolve any .local mDNS candidates embedded in the SDP offer.
+	// Chrome/Vivaldi may include obfuscated .local hostnames directly in the
+	// SDP (non-trickle ICE) rather than as separate trickle candidates, so
+	// they bypass the per-candidate resolveMDNSCandidate path.
+	offer.SDP, err = resolveSDPMDNSCandidates(offer.SDP)
+	if err != nil {
+		dbgLog("ExchangeOffer: resolveSDPMDNSCandidates failed: %v", err)
+		return "", err
+	}
 
 	// Set the remote SessionDescription
 	if err = s.peerConnection.SetRemoteDescription(offer); err != nil {
@@ -302,11 +339,15 @@ func newSession(config SessionConfig) (*Session, error) {
 		LoggerFactory: logging.GetPionDefaultLoggerFactory(),
 	}
 
-	if config.MDNSMode != "" && config.MDNSMode != "disabled" {
-		webrtcSettingEngine.SetICEMulticastDNSMode(ice.MulticastDNSModeQueryOnly)
-	} else {
-		webrtcSettingEngine.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
-	}
+	// Always disable pion's ICE mDNS socket. The device's own mDNS service
+	// (internal/mdns) owns port 5353 using the same pion/mdns library.
+	// On ARM uclibc, when pion's ICE socket closes (drops multicast membership),
+	// it corrupts the shared multicast state, breaking subsequent ICE sessions.
+	// Instead we resolve .local candidates ourselves via resolveMDNSCandidate
+	// before passing them to pion.
+	dbgLog("newSession: isCloud=%v mdnsMode=%q ws=%p", config.IsCloud, config.MDNSMode, config.ws)
+	dbgLog("newSession: setting MulticastDNSModeDisabled (mdnsMode=%q)", config.MDNSMode)
+	webrtcSettingEngine.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
 
 	iceServer := webrtc.ICEServer{}
 
@@ -346,13 +387,16 @@ func newSession(config SessionConfig) (*Session, error) {
 	}
 
 	api := webrtc.NewAPI(webrtc.WithSettingEngine(webrtcSettingEngine))
+	dbgLog("newSession: calling api.NewPeerConnection")
 	peerConnection, err := api.NewPeerConnection(webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{iceServer},
 	})
 	if err != nil {
+		dbgLog("newSession: api.NewPeerConnection FAILED: %v", err)
 		scopedLogger.Warn().Err(err).Msg("Failed to create PeerConnection")
 		return nil, err
 	}
+	dbgLog("newSession: PeerConnection created OK ptr=%p", peerConnection)
 
 	session := &Session{peerConnection: peerConnection}
 	session.rpcQueue = make(chan webrtc.DataChannelMessage, 256)
@@ -414,20 +458,41 @@ func newSession(config SessionConfig) (*Session, error) {
 		}
 	})
 
+	// Route incoming audio track (browser mic) to the UAC2 USB audio gadget.
+	peerConnection.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
+		if track.Kind() == webrtc.RTPCodecTypeAudio {
+			go micStart(track)
+		}
+	})
+
 	var isConnected bool
 
 	peerConnection.OnICECandidate(func(candidate *webrtc.ICECandidate) {
 		scopedLogger.Info().Interface("candidate", candidate).Msg("WebRTC peerConnection has a new ICE candidate")
-		if candidate != nil && config.ws != nil {
-			err := wsjson.Write(context.Background(), config.ws, gin.H{"type": "new-ice-candidate", "data": candidate.ToJSON()})
-			if err != nil {
-				scopedLogger.Warn().Err(err).Msg("failed to write new-ice-candidate to WebRTC signaling channel")
+		if candidate != nil {
+			dbgLog("localICECandidate ptr=%p: %s", peerConnection, candidate.ToJSON().Candidate)
+			if config.ws != nil {
+				err := wsjson.Write(context.Background(), config.ws, gin.H{"type": "new-ice-candidate", "data": candidate.ToJSON()})
+				if err != nil {
+					scopedLogger.Warn().Err(err).Msg("failed to write new-ice-candidate to WebRTC signaling channel")
+					dbgLog("localICECandidate SEND FAILED ptr=%p: %v", peerConnection, err)
+				}
+			} else {
+				dbgLog("localICECandidate ptr=%p: ws==nil, not sending", peerConnection)
 			}
+		} else {
+			dbgLog("localICECandidate ptr=%p: gathering complete (nil candidate)", peerConnection)
 		}
+	})
+
+	peerConnection.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		scopedLogger.Info().Str("connectionState", state.String()).Msg("PeerConnection state has changed")
+		dbgLog("PC state=%s ptr=%p isCloud=%v isCurrentSession=%v", state, peerConnection, config.IsCloud, session == currentSession)
 	})
 
 	peerConnection.OnICEConnectionStateChange(func(connectionState webrtc.ICEConnectionState) {
 		scopedLogger.Info().Str("connectionState", connectionState.String()).Msg("ICE Connection State has changed")
+		dbgLog("ICE state=%s ptr=%p isCloud=%v isCurrentSession=%v isConnected=%v", connectionState, peerConnection, config.IsCloud, session == currentSession, isConnected)
 		if connectionState == webrtc.ICEConnectionStateConnected {
 			if !isConnected {
 				isConnected = true
@@ -444,10 +509,13 @@ func newSession(config SessionConfig) (*Session, error) {
 		if connectionState == webrtc.ICEConnectionStateDisconnected ||
 			connectionState == webrtc.ICEConnectionStateFailed {
 			scopedLogger.Debug().Str("state", connectionState.String()).Msg("ICE connection lost, closing peerConnection")
+			dbgLog("ICE state=%s → calling peerConnection.Close() ptr=%p isCurrentSession=%v", connectionState, peerConnection, session == currentSession)
 			_ = peerConnection.Close()
+			dbgLog("ICE state=%s → peerConnection.Close() returned ptr=%p", connectionState, peerConnection)
 		}
 		if connectionState == webrtc.ICEConnectionStateClosed {
 			scopedLogger.Debug().Msg("ICE Connection State is closed, unmounting virtual media")
+			dbgLog("ICE state=closed ptr=%p isCurrentSession=%v → setting currentSession=nil", peerConnection, session == currentSession)
 			if session == currentSession {
 				// Cancel any ongoing keyboard report multi when session closes
 				cancelKeyboardMacro()
@@ -501,14 +569,24 @@ func onActiveSessionsChanged() {
 }
 
 func onFirstSessionConnected() {
+	codec := ""
+	ptr := (*webrtc.PeerConnection)(nil)
+	if currentSession != nil {
+		codec = currentSession.codecMimeType
+		ptr = currentSession.peerConnection
+	}
+	dbgLog("onFirstSessionConnected: codec=%s ptr=%p", codec, ptr)
+	atomic.StoreUintptr(&videoFrameLogOnce, 0) // reset so first frame of new session is logged
 	notifyFailsafeMode(currentSession)
 	if currentSession != nil && currentSession.codecMimeType == webrtc.MimeTypeH265 {
 		_ = nativeInstance.VideoSetCodecType(1)
 	} else {
 		_ = nativeInstance.VideoSetCodecType(0)
 	}
-	_ = nativeInstance.VideoStart()
+	err := nativeInstance.VideoStart()
+	dbgLog("onFirstSessionConnected: VideoStart() returned %v", err)
 	stopVideoSleepModeTicker()
+	audioStart()
 }
 
 func onLastSessionDisconnected() {
@@ -516,4 +594,6 @@ func onLastSessionDisconnected() {
 	_ = rpcKeyboardReport(0, keyboardClearStateKeys)
 	_ = nativeInstance.VideoStop()
 	startVideoSleepModeTicker()
+	audioStop()
+	micStop()
 }

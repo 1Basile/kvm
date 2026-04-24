@@ -1,6 +1,7 @@
 package mdns
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"reflect"
@@ -207,4 +208,37 @@ func (m *MDNS) SetOptions(options *MDNSOptions) error {
 	m.setLocalNames(options.LocalNames)
 	m.setListenOptions(options.ListenOptions)
 	return m.Restart()
+}
+
+// QueryHost resolves a .local hostname to an IP address using the persistent mDNS connection.
+// pion/mdns Conn.Query returns the ResourceHeader and the source address of the mDNS responder.
+func (m *MDNS) QueryHost(ctx context.Context, host string) (net.IP, error) {
+	m.lock.Lock()
+	conn := m.conn
+	m.lock.Unlock()
+	if conn == nil {
+		return nil, fmt.Errorf("mDNS server not running")
+	}
+	_, addr, err := conn.Query(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	switch a := addr.(type) {
+	case *net.UDPAddr:
+		return a.IP, nil
+	case *net.TCPAddr:
+		return a.IP, nil
+	case *net.IPAddr:
+		return a.IP, nil
+	default:
+		h, _, splitErr := net.SplitHostPort(addr.String())
+		if splitErr != nil {
+			return nil, fmt.Errorf("unexpected addr type %T: %s", addr, addr.String())
+		}
+		ip := net.ParseIP(h)
+		if ip == nil {
+			return nil, fmt.Errorf("failed to parse IP from addr %s", addr.String())
+		}
+		return ip, nil
+	}
 }

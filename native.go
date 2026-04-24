@@ -2,6 +2,7 @@ package kvm
 
 import (
 	"os"
+	"sync/atomic"
 	"time"
 
 	"github.com/jetkvm/kvm/internal/diagnostics"
@@ -13,8 +14,9 @@ import (
 )
 
 var (
-	nativeInstance native.NativeInterface
-	nativeCmdLock  = sync.Mutex{}
+	nativeInstance    native.NativeInterface
+	nativeCmdLock     = sync.Mutex{}
+	videoFrameLogOnce uintptr // set to 1 after first frame is logged for current session
 )
 
 func initNative(systemVersion *semver.Version, appVersion *semver.Version) {
@@ -34,6 +36,11 @@ func initNative(systemVersion *semver.Version, appVersion *semver.Version) {
 		MaxRestartAttempts:   config.NativeMaxRestart,
 		OnNativeRestart: func() {
 			configureDisplayOnNativeRestart()
+			go func() {
+				if err := nativeInstance.VideoSetEDID(config.EdidString); err != nil {
+					nativeLogger.Warn().Err(err).Msg("error re-setting EDID after native restart")
+				}
+			}()
 		},
 		OnVideoStateChange: func(state native.VideoState) {
 			lastVideoState = state
@@ -69,9 +76,13 @@ func initNative(systemVersion *semver.Version, appVersion *semver.Version) {
 		},
 		OnVideoFrameReceived: func(frame []byte, duration time.Duration) {
 			if currentSession != nil {
+				if atomic.CompareAndSwapUintptr(&videoFrameLogOnce, 0, 1) {
+					dbgLog("WriteSample first frame: %d bytes codec=%s ptr=%p", len(frame), currentSession.codecMimeType, currentSession.peerConnection)
+				}
 				err := currentSession.VideoTrack.WriteSample(media.Sample{Data: frame, Duration: duration})
 				if err != nil {
 					nativeLogger.Warn().Err(err).Msg("error writing sample")
+					dbgLog("WriteSample ERROR ptr=%p: %v", currentSession.peerConnection, err)
 				}
 			}
 		},

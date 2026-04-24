@@ -455,6 +455,19 @@ func handleSessionRequest(
 		}
 	}
 
+	// Close the previous session BEFORE creating the new one (same mDNS socket race as local path).
+	if currentSession != nil {
+		dbgLog("handleSessionRequest: currentSession!=nil ptr=%p → closing old session first", currentSession.peerConnection)
+		writeJSONRPCEvent("otherSessionConnected", nil, currentSession)
+		_ = currentSession.peerConnection.Close()
+		currentSession = nil
+		dbgLog("handleSessionRequest: old session Close() returned, sleeping 200ms")
+		time.Sleep(200 * time.Millisecond)
+		dbgLog("handleSessionRequest: sleep done, creating new session")
+	} else {
+		dbgLog("handleSessionRequest: currentSession==nil, creating new session directly")
+	}
+
 	session, err := newSession(SessionConfig{
 		ws:         c,
 		IsCloud:    isCloudConnection,
@@ -472,14 +485,6 @@ func handleSessionRequest(
 	if err != nil {
 		_ = wsjson.Write(context.Background(), c, gin.H{"error": err})
 		return err
-	}
-	if currentSession != nil {
-		writeJSONRPCEvent("otherSessionConnected", nil, currentSession)
-		peerConn := currentSession.peerConnection
-		go func() {
-			time.Sleep(1 * time.Second)
-			_ = peerConn.Close()
-		}()
 	}
 
 	cloudLogger.Info().Interface("session", session).Msg("new session accepted")

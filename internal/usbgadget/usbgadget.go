@@ -21,6 +21,7 @@ type Devices struct {
 	Keyboard      bool `json:"keyboard"`
 	MassStorage   bool `json:"mass_storage"`
 	SerialConsole bool `json:"serial_console"`
+	UAC2Audio     bool `json:"uac2_audio"`
 }
 
 // Config is a struct that represents the customizations for a USB gadget.
@@ -41,6 +42,7 @@ var defaultUsbGadgetDevices = Devices{
 	RelativeMouse: true,
 	Keyboard:      true,
 	MassStorage:   true,
+	UAC2Audio:     true,
 }
 
 type KeysDownState struct {

@@ -153,6 +153,12 @@ export interface RTCState {
   transceiver: RTCRtpTransceiver | null;
   setTransceiver: (transceiver: RTCRtpTransceiver) => void;
 
+  audioTransceiver: RTCRtpTransceiver | null;
+  setAudioTransceiver: (transceiver: RTCRtpTransceiver) => void;
+
+  micEnabled: boolean;
+  setMicEnabled: (enabled: boolean) => void;
+
   mediaStream: MediaStream | null;
   setMediaStream: (stream: MediaStream) => void;
 
@@ -211,6 +217,12 @@ export const useRTCStore = create<RTCState>(set => ({
 
   transceiver: null,
   setTransceiver: transceiver => set({ transceiver }),
+
+  audioTransceiver: null,
+  setAudioTransceiver: transceiver => set({ audioTransceiver: transceiver }),
+
+  micEnabled: false,
+  setMicEnabled: enabled => set({ micEnabled: enabled }),
 
   peerConnectionState: null,
   setPeerConnectionState: state => set({ peerConnectionState: state }),
@@ -400,6 +412,9 @@ export interface SettingsState {
 
   hideStatusBar: boolean;
   setHideStatusBar: (hide: boolean) => void;
+
+  clipboardAutoSync: boolean;
+  setClipboardAutoSync: (enabled: boolean) => void;
 }
 
 export const useSettingsStore = create(
@@ -455,6 +470,9 @@ export const useSettingsStore = create(
 
       hideStatusBar: false,
       setHideStatusBar: (hide: boolean) => set({ hideStatusBar: hide }),
+
+      clipboardAutoSync: false,
+      setClipboardAutoSync: (enabled: boolean) => set({ clipboardAutoSync: enabled }),
     }),
     {
       name: "settings",

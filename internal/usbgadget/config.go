@@ -62,6 +62,8 @@ var defaultGadgetConfig = map[string]gadgetConfigItem{
 	"mass_storage_lun0": massStorageLun0Config,
 	// serial console (CDC-ACM)
 	"serial_console": serialConsoleConfig,
+	// USB audio (UAC2) - provides mic input + speaker output to target machine
+	"uac2_audio": uac2AudioConfig,
 }
 
 func (u *UsbGadget) isGadgetConfigItemEnabled(itemKey string) bool {
@@ -78,6 +80,8 @@ func (u *UsbGadget) isGadgetConfigItemEnabled(itemKey string) bool {
 		return u.enabledDevices.MassStorage
 	case "serial_console":
 		return u.enabledDevices.SerialConsole
+	case "uac2_audio":
+		return u.enabledDevices.UAC2Audio
 	default:
 		return true
 	}
